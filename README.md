@@ -49,7 +49,7 @@ ETF를 통해 섹터별 수급(거래대금 증가) + 상대강도(RS) + 뉴스 
 pip install -r requirements.txt
 
 
-### 2. 환경 변수 설정[cite: 7]
+### 2. 환경 변수 설정
 
 `.env` 파일 생성
 
@@ -60,6 +60,23 @@ KRX_API_KEY=your_api_key_here
  
 python sector_rotation_alert.py
 
+## ⚙️ 설정 (config.yaml)
+
+### 주요 파라미터
+
+
+# 순환매 감지 임계값
+rotation_detection:
+  long_term_period: 60        # 장기 추세 기간
+  short_term_period: 10       # 단기 반등 기간
+  undervalued_threshold: -10  # 바닥권 기준 (%)
+  bounce_threshold: 5         # 반등 기준 (%)
+  volume_surge_ratio: 1.5     # 거래량 급증 기준
+
+# 출력 필터
+output:
+  show_top_n: 15              # 상위 N개만 표시
+  min_rotation_score: 4       # 최소 점수 (0-8)
 
  
  
