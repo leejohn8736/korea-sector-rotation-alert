@@ -56,6 +56,10 @@ pip install -r requirements.txt
 KRX_API_KEY=your_api_key_here
 
 
+### 3. 실행[cite: 8]
  
+python sector_rotation_alert.py
+
+
  
  
