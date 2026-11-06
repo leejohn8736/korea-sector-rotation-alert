@@ -50,6 +50,6 @@ ETF를 통해 섹터별 수급(거래대금 증가) + 상대강도(RS) + 뉴스 
 pip install -r requirements.txt
 
 
-
-
-
+### 2 설치 및 실행
+ 
+ 
