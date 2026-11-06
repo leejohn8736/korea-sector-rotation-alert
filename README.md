@@ -161,6 +161,7 @@ python sector_rotation_alert.py
 ##  📁 파일 구조 
 
 
+```text
 korea-sector-rotation-alert/
 ├── sector_rotation_alert.py  # 메인 스크립트
 ├── config.yaml               # 설정 파일
@@ -168,5 +169,8 @@ korea-sector-rotation-alert/
 ├── .env                      # API 키 (gitignore)
 ├── .gitignore
 └── README.md
+
+
+
 
 
