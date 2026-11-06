@@ -44,13 +44,11 @@ ETF를 통해 섹터별 수급(거래대금 증가) + 상대강도(RS) + 뉴스 
 
   ## 🚀 설치 및 실행
 
-### 1. 의존성 설치[cite: 5]
+### 1. 의존성 설치[cite: 6]
 
 ```bash
 pip install -r requirements.txt
-```[cite: 5]
-
-### 2. 환경 변수 설정
+```[cite: 6]
 
 
 
