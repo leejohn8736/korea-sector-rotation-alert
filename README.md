@@ -156,3 +156,17 @@ python sector_rotation_alert.py
   
   ----------------------------------------------------------------   
  
+
+
+##  📁 파일 구조 
+
+
+korea-sector-rotation-alert/
+├── sector_rotation_alert.py  # 메인 스크립트
+├── config.yaml               # 설정 파일
+├── requirements.txt          # 의존성
+├── .env                      # API 키 (gitignore)
+├── .gitignore
+└── README.md
+
+
