@@ -48,7 +48,8 @@ ETF를 통해 섹터별 수급(거래대금 증가) + 상대강도(RS) + 뉴스 
 
 ```bash
 pip install -r requirements.txt
-```[cite: 6]
+
+
 
 
 
