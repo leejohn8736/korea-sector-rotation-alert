@@ -66,17 +66,20 @@ python sector_rotation_alert.py
 
 
 # 순환매 감지 임계값
+
 rotation_detection:
-  long_term_period: 60        # 장기 추세 기간
-  short_term_period: 10       # 단기 반등 기간
-  undervalued_threshold: -10  # 바닥권 기준 (%)
-  bounce_threshold: 5         # 반등 기준 (%)
-  volume_surge_ratio: 1.5     # 거래량 급증 기준
+  long_term_period: 60        # 장기 추세 기간[cite: 10]
+  short_term_period: 10       # 단기 반등 기간[cite: 10]
+  undervalued_threshold: -10  # 바닥권 기준 (%)[cite: 10]
+  bounce_threshold: 5         # 반등 기준 (%)[cite: 10]
+  volume_surge_ratio: 1.5     # 거래량 급증 기준[cite: 10]
 
 # 출력 필터
+
 output:
-  show_top_n: 15              # 상위 N개만 표시
-  min_rotation_score: 4       # 최소 점수 (0-8)
+  show_top_n: 15              # 상위 N개만 표시[cite: 10]
+  min_rotation_score: 4       # 최소 점수 (0-8)[cite: 10]
+
 
  
  
