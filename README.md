@@ -154,8 +154,7 @@ python sector_rotation_alert.py
    * 손절매 라인 설정
    * 포지션 크기 조절
   
-  ----------------------------------------------------------------   
- 
+======================================================
 ##  📁 파일 구조 
 
 ```text
@@ -167,7 +166,7 @@ korea-sector-rotation-alert/
 ├── .gitignore
 └── README.md
 
-
+============================================
 
 ## 🔄 업데이트 이력
 
@@ -182,6 +181,25 @@ korea-sector-rotation-alert/
 ### v1.0 (2025-02-02)
 * 기본 수급 분석 기능
 * KRX Open API 연동
+
+=======================================
+
+## 📞 문의
+
+* **GitHub Issues:** 문의하기
+* **라이센스:** MIT
+
+
+======================================
+
+## 🙏 기여
+
+Pull Request는 언제나 환영합니다!
+1. Fork the Project
+2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the Branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
 
 
 
