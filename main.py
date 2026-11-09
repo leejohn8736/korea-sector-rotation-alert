@@ -1,11 +1,12 @@
 """
-KRX OPEN API 연동 버전 - 주식 섹터 순환매 분석 봇 (v2.1)
+KRX OPEN API 연동 버전 - 주식 섹터 순환매 분석 봇 (v2.3 - 날짜 고정 버전)
 개선 사항:
 - 순환매 초기 신호 감지 (바닥 반등 패턴)
 - 다중 지표 통합 분석 (거래대금, RS, 모멘텀)
 - 섹터별 순환매 점수 시스템
 - 전체 35개 섹터 커버리지
 - 텔레그램 알림 기능 추가
+- 분석 기준일 2024년 6월 30일 고정
 """
 
 import requests
@@ -70,12 +71,12 @@ alerts_config = config.get('alerts', {})
 enable_alerts = alerts_config.get('enable', False)
 rotation_score_threshold = alerts_config.get('rotation_score_threshold', 6)
 
-# 날짜 설정
-end_date_dt = datetime.date.today() - datetime.timedelta(days=1)  # 어제
+# 날짜 설정: 테스트를 위해 2024년 6월 30일로 기준일 고정
+end_date_dt = datetime.date(2024, 6, 30)
 start_date_dt = end_date_dt - datetime.timedelta(days=period_days)
 
 print(f"{'='*80}")
-print(f"KRX 섹터 순환매 분석 시스템 v2.1")
+print(f"KRX 섹터 순환매 분석 시스템 v2.3")
 print(f"{'='*80}")
 print(f"데이터 기간: {start_date_dt} ~ {end_date_dt}")
 print(f"분석 섹터: {len(sectors)}개")
@@ -87,9 +88,7 @@ print(f"{'='*80}\n")
 
 
 def send_telegram_message(message):
-    """
-    텔레그램 메시지 전송
-    """
+    """텔레그램 메시지 전송"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return False
     
@@ -115,9 +114,7 @@ def send_telegram_message(message):
 
 
 def get_krx_etf_daily_single(base_date):
-    """
-    KRX Open API - ETF 일별매매정보 (단일 날짜)
-    """
+    """KRX Open API - ETF 일별매매정보 (단일 날짜)"""
     url = "https://data-dbg.krx.co.kr/svc/apis/etp/etf_bydd_trd"
     
     headers = {
@@ -150,9 +147,7 @@ def get_krx_etf_daily_single(base_date):
 
 
 def get_krx_etf_daily(tickers, start_date, end_date):
-    """
-    KRX Open API - ETF 일별매매정보 (기간 조회)
-    """
+    """KRX Open API - ETF 일별매매정보 (기간 조회)"""
     all_data = []
     current_date = start_date
     
@@ -169,14 +164,14 @@ def get_krx_etf_daily(tickers, start_date, end_date):
                 all_data.append(df)
                 print(f"✓ ({len(df)}개)")
             else:
-                print("✗")
+                print("✗ (휴장일 또는 데이터 없음)")
             
-            time.sleep(1)
+            time.sleep(0.5)  # 부하 방지
         
         current_date += datetime.timedelta(days=1)
     
     if not all_data:
-        raise Exception("수집된 데이터가 없습니다.")
+        raise Exception("수집된 데이터가 없습니다. API 키 상태나 날짜 범위를 확인하세요.")
     
     df_all = pd.concat(all_data, ignore_index=True)
     
@@ -190,16 +185,20 @@ def get_krx_etf_daily(tickers, start_date, end_date):
     }
     
     for krx_col, new_col in numeric_cols.items():
-        df_all[new_col] = pd.to_numeric(
-            df_all[krx_col].replace('-', None), 
-            errors='coerce'
-        )
+        if krx_col in df_all.columns:
+            df_all[new_col] = pd.to_numeric(
+                df_all[krx_col].astype(str).str.replace(',', '').replace('-', None), 
+                errors='coerce'
+            )
     
     # 관심 종목만 필터링
     df_filtered = df_all[df_all['ISU_CD'].isin(tickers)].copy()
     
     print(f"필터링 후 레코드: {len(df_filtered):,}개")
     print(f"수집된 종목: {df_filtered['ISU_CD'].nunique()}개 / {len(tickers)}개")
+    
+    if len(df_filtered) == 0:
+        raise Exception("필터링된 종목 데이터가 없습니다. 티커 코드를 확인해주세요.")
     
     # Pivot 테이블 생성
     close_data = df_filtered.pivot(
@@ -224,12 +223,7 @@ def get_krx_etf_daily(tickers, start_date, end_date):
 
 
 def detect_sector_rotation(close_data, volume_data, trade_value, symbol, market_ticker):
-    """
-    개선된 섹터 순환매 감지 로직
-    
-    Returns:
-        dict: 순환매 분석 결과
-    """
+    """개선된 섹터 순환매 감지 로직"""
     result = {
         'rotation_score': 0,
         'is_undervalued': False,
@@ -244,22 +238,25 @@ def detect_sector_rotation(close_data, volume_data, trade_value, symbol, market_
     }
     
     try:
+        if symbol not in close_data.columns:
+            return result
+
         # 1. 장기 약세 확인 (바닥권)
-        if len(close_data[symbol]) >= long_term_period:
+        if len(close_data[symbol].dropna()) >= long_term_period:
             long_ret = close_data[symbol].pct_change(long_term_period).iloc[-1] * 100
             result['long_term_ret'] = round(long_ret, 2)
             result['is_undervalued'] = long_ret < undervalued_threshold
         
         # 2. 단기 반등 확인
-        if len(close_data[symbol]) >= short_term_period:
+        if len(close_data[symbol].dropna()) >= short_term_period:
             short_ret = close_data[symbol].pct_change(short_term_period).iloc[-1] * 100
             result['short_term_ret'] = round(short_ret, 2)
             result['is_bouncing'] = short_ret > bounce_threshold
         
         # 3. 거래량 급증 확인
-        if len(trade_value[symbol]) >= 65:  # long_term_period + 5
+        if symbol in trade_value.columns and len(trade_value[symbol].dropna()) >= 15:
             recent_vol = trade_value[symbol].tail(5).mean()
-            base_vol = trade_value[symbol].iloc[-65:-5].mean()
+            base_vol = trade_value[symbol].iloc[:-5].tail(20).mean()
             
             if base_vol > 0 and pd.notna(base_vol):
                 vol_ratio = recent_vol / base_vol
@@ -267,14 +264,12 @@ def detect_sector_rotation(close_data, volume_data, trade_value, symbol, market_
                 result['has_volume_surge'] = vol_ratio > volume_surge_ratio
         
         # 4. 상대강도 개선 확인
-        if market_ticker in close_data.columns:
+        if market_ticker in close_data.columns and symbol in close_data.columns:
             if len(close_data) >= medium_term_period + 5:
-                # 과거 RS (4주 전)
                 past_market = close_data[market_ticker].pct_change(medium_term_period).iloc[-21]
                 past_sector = close_data[symbol].pct_change(medium_term_period).iloc[-21]
                 past_rs = (past_sector - past_market) * 100 if pd.notna(past_sector) and pd.notna(past_market) else 0
                 
-                # 현재 RS
                 current_market = close_data[market_ticker].pct_change(medium_term_period).iloc[-1]
                 current_sector = close_data[symbol].pct_change(medium_term_period).iloc[-1]
                 current_rs = (current_sector - current_market) * 100 if pd.notna(current_sector) and pd.notna(current_market) else 0
@@ -315,7 +310,7 @@ def get_news_headlines(keyword, max_headlines=3):
         return ["뉴스 조회 실패"]
 
 
-# 데이터 불러오기
+# 데이터 불러오기 실행
 try:
     close_data, volume_data, trade_value = get_krx_etf_daily(
         etf_list + [market_ticker], 
@@ -327,7 +322,7 @@ try:
     print(f"  데이터 기간: {close_data.index.min().date()} ~ {close_data.index.max().date()}")
 except Exception as e:
     print(f"\n✗ 데이터 불러오기 실패: {e}")
-    exit()
+    exit(1)
 
 
 # 분석 시작
@@ -349,7 +344,7 @@ for symbol, name in sectors.items():
         close_data, volume_data, trade_value, symbol, market_ticker
     )
     
-    # 기존 수급 증가율 계산
+    # 수급 증가율 계산
     try:
         recent_tv = trade_value[symbol].tail(volume_recent).mean()
         prev_tv = trade_value[symbol].iloc[-(volume_recent + volume_prev):-volume_recent].mean()
@@ -380,8 +375,11 @@ for symbol, name in sectors.items():
         '뉴스': headlines
     })
     
-    # 진행상황 출력
     print(f"  [{name}] 순환매 점수: {rotation_result['rotation_score']}/8")
+
+if not summary:
+    print("분석된 섹터 데이터가 없습니다.")
+    exit(0)
 
 # 결과 정리
 df_summary = pd.DataFrame(summary)
@@ -425,48 +423,39 @@ print(f"\n{'='*80}")
 print(f"분석 결과 (상위 {len(df_summary)}개 섹터)")
 print(f"{'='*80}\n")
 
-# 카테고리별 분류
 rotation_signals = df_summary[df_summary['순환매점수'] >= 6]
 strong_momentum = df_summary[(df_summary['순환매점수'] >= 4) & (df_summary['순환매점수'] < 6)]
 
 if len(rotation_signals) > 0:
-    print(f"{'🚀 순환매 초기 신호 (HIGH PRIORITY)':=^80}")
-    print()
-    
+    print(f"{'🚀 순환매 초기 신호 (HIGH PRIORITY)':=^80}\n")
     for _, row in rotation_signals.iterrows():
         print(f"[{row['섹터']}] 순환매 점수: {row['순환매점수']}/8 ⭐")
         print(f"  티커: {row['종목코드']}")
         print(f"  📊 수익률: 장기 {row['장기수익률']:+.1f}% {'(바닥권 ✓)' if row['바닥권'] else ''} | 단기 {row['단기수익률']:+.1f}% {'(반등 ✓)' if row['반등중'] else ''}")
         print(f"  💰 거래량: {row['거래량배수']:.2f}배 {'(급증 ✓)' if row['거래량급증'] else ''} | 수급 증가: {row['수급증가율']:+.1f}%")
         print(f"  📈 RS: 현재 {row['현재RS']:+.1f}% | 과거 {row['과거RS']:+.1f}% {'(개선 ✓)' if row['RS개선'] else ''}")
-        
         if row['뉴스']:
             print(f"  📰 최근 뉴스:")
             for i, title in enumerate(row['뉴스'], 1):
                 print(f"     {i}. {title}")
-        
         print("-" * 80)
 
 if len(strong_momentum) > 0:
-    print(f"\n{'🔥 강한 모멘텀 지속':=^80}")
-    print()
-    
+    print(f"\n{'🔥 강한 모멘텀 지속':=^80}\n")
     for _, row in strong_momentum.iterrows():
         print(f"[{row['섹터']}] 순환매 점수: {row['순환매점수']}/8")
         print(f"  티커: {row['종목코드']}")
         print(f"  📊 수익률: 장기 {row['장기수익률']:+.1f}% | 단기 {row['단기수익률']:+.1f}%")
         print(f"  💰 수급 증가: {row['수급증가율']:+.1f}% | RS: {row['현재RS']:+.1f}%")
-        
         if row['뉴스']:
             print(f"  📰 뉴스: {row['뉴스'][0]}")
-        
         print("-" * 80)
 
 print(f"\n{'='*80}")
 print(f"분석 완료! 총 {len(df_summary)}개 유망 섹터 발견")
 print(f"{'='*80}\n")
 
-# CSV 저장 (선택사항)
+# CSV 저장
 output_file = f"sector_rotation_analysis_{end_date_dt.strftime('%Y%m%d')}.csv"
 df_summary.to_csv(output_file, index=False, encoding='utf-8-sig')
 print(f"📁 결과 저장: {output_file}")
