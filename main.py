@@ -1,12 +1,12 @@
 """
-KRX OPEN API 연동 버전 - 주식 섹터 순환매 분석 봇 (v2.3 - 날짜 고정 버전)
+KRX OPEN API 연동 버전 - 주식 섹터 순환매 분석 봇 (v2.4 - 라이브 데이터 버전)
 개선 사항:
 - 순환매 초기 신호 감지 (바닥 반등 패턴)
 - 다중 지표 통합 분석 (거래대금, RS, 모멘텀)
 - 섹터별 순환매 점수 시스템
 - 전체 35개 섹터 커버리지
 - 텔레그램 알림 기능 추가
-- 분석 기준일 2024년 6월 30일 고정
+- 승인된 API 기간에 맞는 실시간 최근 데이터 조회
 """
 
 import requests
@@ -71,12 +71,12 @@ alerts_config = config.get('alerts', {})
 enable_alerts = alerts_config.get('enable', False)
 rotation_score_threshold = alerts_config.get('rotation_score_threshold', 6)
 
-# 날짜 설정: 테스트를 위해 2024년 6월 30일로 기준일 고정
-end_date_dt = datetime.date(2024, 6, 30)
+# 날짜 설정: 승인된 API 기간(2026년 현재)에 맞게 어제 날짜 기준으로 설정
+end_date_dt = datetime.date.today() - datetime.timedelta(days=1)
 start_date_dt = end_date_dt - datetime.timedelta(days=period_days)
 
 print(f"{'='*80}")
-print(f"KRX 섹터 순환매 분석 시스템 v2.3")
+print(f"KRX 섹터 순환매 분석 시스템 v2.4")
 print(f"{'='*80}")
 print(f"데이터 기간: {start_date_dt} ~ {end_date_dt}")
 print(f"분석 섹터: {len(sectors)}개")
@@ -171,7 +171,7 @@ def get_krx_etf_daily(tickers, start_date, end_date):
         current_date += datetime.timedelta(days=1)
     
     if not all_data:
-        raise Exception("수집된 데이터가 없습니다. API 키 상태나 날짜 범위를 확인하세요.")
+        raise Exception("수집된 데이터가 없습니다. (주말이거나 해당 기간 최신 데이터가 아직 반영되지 않았을 수 있습니다.)")
     
     df_all = pd.concat(all_data, ignore_index=True)
     
@@ -198,7 +198,7 @@ def get_krx_etf_daily(tickers, start_date, end_date):
     print(f"수집된 종목: {df_filtered['ISU_CD'].nunique()}개 / {len(tickers)}개")
     
     if len(df_filtered) == 0:
-        raise Exception("필터링된 종목 데이터가 없습니다. 티커 코드를 확인해주세요.")
+        raise Exception("필터링된 종목 데이터가 없습니다.")
     
     # Pivot 테이블 생성
     close_data = df_filtered.pivot(
