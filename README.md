@@ -1,4 +1,4 @@
-# Korea Sector Rotation Alert
+# Korea Sector Rotation Alert ( 작동 안 됨) =부재중
 
 한국 주식 시장 섹터 순환매(Rotation)를 감지하고 알림을 주는 시스템입니다.
 
