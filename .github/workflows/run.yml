@@ -2,10 +2,15 @@ name: 예상 섹터 테마
 
 on:
   schedule:
-    - cron: '0 2 * * 1-5'   # 월~금 점심 11:00 KST (UTC 02:00)
-    - cron: '0 3 * * 1-5'   # 월~금 점심 12:00 KST (UTC 03:00)
-    - cron: '0 8 * * 1-5'   # 월~금 저녁 17:00 KST (UTC 08:00)
-    - cron: '0 9 * * 1-5'   # 월~금 저녁 18:00 KST (UTC 09:00)
+    # 1. 아침 시간대 (한국 시간 KST 기준)
+    - cron: '0 22 * * *'   # 매일 아침 07:00 KST (UTC 전날 22:00)
+    - cron: '0 23 * * *'   # 매일 아침 08:00 KST (UTC 전날 23:00)
+    - cron: '0 0 * * *'    # 매일 아침 09:00 KST (UTC 당일 00:00)
+    
+    # 2. 오후 시간대 (한국 시간 KST 기준)
+    - cron: '0 4 * * *'    # 매일 오후 13:00 KST (UTC 04:00)
+    - cron: '0 6 * * *'    # 매일 오후 15:00 KST (UTC 06:00)
+    - cron: '0 8 * * *'    # 매일 오후 17:00 KST (UTC 08:00)
 
   workflow_dispatch:
     inputs:
@@ -49,7 +54,8 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-        run: python bnf_signal.py ${{ steps.m.outputs.markets }}
+          KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
+        run: python main.py ${{ steps.m.outputs.markets }}
         
       - name: Commit results
         run: |
