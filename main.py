@@ -58,7 +58,7 @@ def send_telegram(text):
             return False
     return True
 
-### ---------------------------------------------------------------- 2. Groq AI 요약 (타임아웃 및 재시도 보강)
+### ---------------------------------------------------------------- 2. Groq AI 요약 (모델명 수정 및 재시도)
 def analyze_with_groq(summary_data):
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
@@ -71,7 +71,8 @@ def analyze_with_groq(summary_data):
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "llama-3.3-70b-versatile",
+        # 지원되는 안정적인 모델명으로 교체 (llama-3.1-70b-versatile)
+        "model": "llama-3.1-70b-versatile",
         "messages": [
             {
                 "role": "system", 
@@ -103,7 +104,7 @@ def analyze_with_groq(summary_data):
             print(f"💥 Groq 통신 예외 발생 (시도 {attempt+1}/3): {e}")
             time.sleep(5)
             
-    return "⚠️ Groq AI 연결 지연 또는 인증 오류로 요약을 불러오지 못했습니다."
+    return "⚠️ Groq AI 연결 지연 또는 모델 오류로 요약을 불러오지 못했습니다."
 
 ### ---------------------------------------------------------------- 3. KRX API 데이터 수집 (방어 로직)
 def fetch_krx_market_data():
@@ -118,9 +119,8 @@ def fetch_krx_market_data():
         print("KRX API 데이터 수집 중 예외 발생:", e)
         return "데이터 수집 일시 지연 (야후 파이낸스 보조 지표로 대체 가동)"
 
-### ---------------------------------------------------------------- 4. 메인 실행 및 인자 처리 (워크플로우 연동)
+### ---------------------------------------------------------------- 4. 메인 실행 및 인자 처리
 def run():
-    # 워크플로우에서 전달받은 마켓 인자 처리 (예: "KR US")
     target_markets = sys.argv[1:] if len(sys.argv) > 1 else ["KR", "US"]
     print(f"🎯 타겟 마켓 설정: {target_markets}")
 
