@@ -58,7 +58,7 @@ def send_telegram(text):
             return False
     return True
 
-### ---------------------------------------------------------------- 2. Groq AI 요약 (방어 로직 포함)
+### ---------------------------------------------------------------- 2. Groq AI 요약 (타임아웃 및 재시도 보강)
 def analyze_with_groq(summary_data):
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
@@ -81,18 +81,22 @@ def analyze_with_groq(summary_data):
         "temperature": 0.3
     }
     
+    # 지연에 대비해 시도 횟수를 3회 유지하되, 타임아웃을 35초로 늘리고 대기 간격을 5초로 완화
     for attempt in range(3):
         try:
-            res = requests.post(url, json=payload, headers=headers, timeout=25)
+            res = requests.post(url, json=payload, headers=headers, timeout=35)
             if res.ok:
                 data = res.json()
                 if "choices" in data and len(data["choices"]) > 0:
                     return data["choices"][0]["message"]["content"]
-            print(f"Groq API 응답 이상 (시도 {attempt+1}):", res.text[:150])
-            time.sleep(3)
+            print(f"Groq API 응답 이상 (시도 {attempt+1}):", res.status_code, res.text[:150])
+            time.sleep(5)
+        except requests.exceptions.Timeout:
+            print(f"⚠️ Groq API 타임아웃 발생 (시도 {attempt+1}/3)")
+            time.sleep(5)
         except Exception as e:
             print(f"Groq 통신 에러 (시도 {attempt+1}):", e)
-            time.sleep(3)
+            time.sleep(5)
             
     return "⚠️ Groq AI 연결 지연으로 요약을 불러오지 못했습니다."
 
@@ -113,7 +117,6 @@ def fetch_krx_market_data():
     # KRX API 연동 예외 방어 블록
     try:
         # 실제 API 호출부 (엔드포인트 연동 시그니처)
-        # 통신 실패 시에도 전체 봇이 죽지 않도록 안전한 빈 리스트/딕셔너리 반환 방어 적용
         market_status = "정상 연동 및 수급 분석 완료"
         return market_status
     except Exception as e:
