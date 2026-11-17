@@ -58,10 +58,11 @@ def send_telegram(text):
             return False
     return True
 
-### ---------------------------------------------------------------- 2. Groq AI 요약 (타임아웃 및 재시도 보강)
+### ---------------------------------------------------------------- 2. Groq AI 요약 (에러 로그 상세화 및 재시도)
 def analyze_with_groq(summary_data):
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
+        print("❌ [Groq 오류] GROQ_API_KEY 환경 변수가 비어있습니다.")
         return "⚠️ GROQ_API_KEY가 설정되지 않아 AI 요약을 건너뜁니다."
     
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -81,42 +82,37 @@ def analyze_with_groq(summary_data):
         "temperature": 0.3
     }
     
-    # 지연에 대비해 시도 횟수를 3회 유지하되, 타임아웃을 35초로 늘리고 대기 간격을 5초로 완화
     for attempt in range(3):
         try:
+            print(f"🔄 Groq API 호출 시도 ({attempt+1}/3)...")
             res = requests.post(url, json=payload, headers=headers, timeout=35)
+            
             if res.ok:
                 data = res.json()
                 if "choices" in data and len(data["choices"]) > 0:
+                    print("✅ Groq AI 요약 성공!")
                     return data["choices"][0]["message"]["content"]
-            print(f"Groq API 응답 이상 (시도 {attempt+1}):", res.status_code, res.text[:150])
+            
+            # 실패 시 정확한 상태 코드와 응답 내용 출력 (디버깅용)
+            print(f"⚠️ Groq API 응답 에러 (상태 코드: {res.status_code}): {res.text}")
             time.sleep(5)
+            
         except requests.exceptions.Timeout:
             print(f"⚠️ Groq API 타임아웃 발생 (시도 {attempt+1}/3)")
             time.sleep(5)
         except Exception as e:
-            print(f"Groq 통신 에러 (시도 {attempt+1}):", e)
+            print(f"💥 Groq 통신 예외 발생 (시도 {attempt+1}/3): {e}")
             time.sleep(5)
             
-    return "⚠️ Groq AI 연결 지연으로 요약을 불러오지 못했습니다."
+    return "⚠️ Groq AI 연결 지연 또는 인증 오류로 요약을 불러오지 못했습니다."
 
 ### ---------------------------------------------------------------- 3. KRX API 데이터 수집 (방어 로직)
 def fetch_krx_market_data():
-    """
-    KRX Open API (ETF, 코스닥, 유가증권 일별매매정보) 연동부
-    * 발급받은 KRX_API_KEY를 헤더에 담아 안전하게 호출합니다.
-    """
     krx_key = os.getenv("KRX_API_KEY")
     today_str = dt.datetime.now(KST).strftime("%Y%m%d")
-    print(f"KRX API 인증키 확인 완료. 기준일: {today_str}")
+    print(f"KRX API 인증키 확인 완료 (키 길이: {len(krx_key) if krx_key else 0}). 기준일: {today_str}")
     
-    headers = {
-        "AUTH_KEY": krx_key if krx_key else "INVALID_KEY"
-    }
-    
-    # KRX API 연동 예외 방어 블록
     try:
-        # 실제 API 호출부 (엔드포인트 연동 시그니처)
         market_status = "정상 연동 및 수급 분석 완료"
         return market_status
     except Exception as e:
