@@ -58,7 +58,7 @@ def send_telegram(text):
             return False
     return True
 
-### ---------------------------------------------------------------- 2. Groq AI 요약 (에러 로그 상세화 및 재시도)
+### ---------------------------------------------------------------- 2. Groq AI 요약 (타임아웃 및 재시도 보강)
 def analyze_with_groq(summary_data):
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
@@ -93,7 +93,6 @@ def analyze_with_groq(summary_data):
                     print("✅ Groq AI 요약 성공!")
                     return data["choices"][0]["message"]["content"]
             
-            # 실패 시 정확한 상태 코드와 응답 내용 출력 (디버깅용)
             print(f"⚠️ Groq API 응답 에러 (상태 코드: {res.status_code}): {res.text}")
             time.sleep(5)
             
@@ -119,8 +118,12 @@ def fetch_krx_market_data():
         print("KRX API 데이터 수집 중 예외 발생:", e)
         return "데이터 수집 일시 지연 (야후 파이낸스 보조 지표로 대체 가동)"
 
-### ---------------------------------------------------------------- 4. 메인 실행 및 방어 로직
+### ---------------------------------------------------------------- 4. 메인 실행 및 인자 처리 (워크플로우 연동)
 def run():
+    # 워크플로우에서 전달받은 마켓 인자 처리 (예: "KR US")
+    target_markets = sys.argv[1:] if len(sys.argv) > 1 else ["KR", "US"]
+    print(f"🎯 타겟 마켓 설정: {target_markets}")
+
     now_kst = dt.datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     asof_date = dt.datetime.now(KST).strftime("%Y-%m-%d")
     
@@ -138,7 +141,7 @@ def run():
     msg += "- [유가증권/코스닥/ETF 일별매매정보]: 수급 스캔 완료\n\n"
     
     # 3. Groq AI 인사이트 결합
-    ai_prompt = f"기준일: {asof_date}, KRX 3대 시장 수급 및 섹터 순환매 동향 브리핑 요청"
+    ai_prompt = f"대상 시장: {target_markets}, 기준일: {asof_date}, KRX 3대 시장 수급 및 섹터 순환매 동향 브리핑 요청"
     ai_summary = analyze_with_groq(ai_prompt)
     
     msg += "🤖 [Groq AI 테마 & 수급 요약]\n" + ai_summary
