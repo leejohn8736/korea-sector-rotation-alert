@@ -58,7 +58,7 @@ def send_telegram(text):
             return False
     return True
 
-### ---------------------------------------------------------------- 2. Groq AI 요약 (모델명 수정 및 재시도)
+### ---------------------------------------------------------------- 2. Groq AI 요약 (모델명 변경 및 에러 원인 즉시 반환)
 def analyze_with_groq(summary_data):
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
@@ -71,8 +71,8 @@ def analyze_with_groq(summary_data):
         "Content-Type": "application/json"
     }
     payload = {
-        # 지원되는 안정적인 모델명으로 교체 (llama-3.1-70b-versatile)
-        "model": "llama-3.1-70b-versatile",
+        # 안정적인 Groq 기본 모델명으로 교체
+        "model": "llama3-70b-8192",
         "messages": [
             {
                 "role": "system", 
@@ -94,7 +94,19 @@ def analyze_with_groq(summary_data):
                     print("✅ Groq AI 요약 성공!")
                     return data["choices"][0]["message"]["content"]
             
-            print(f"⚠️ Groq API 응답 에러 (상태 코드: {res.status_code}): {res.text}")
+            # 실패 시 에러 내용을 콘솔에 출력하고 루프 지속
+            err_msg = f"⚠️ Groq API 응답 에러 (상태 코드: {res.status_code}): {res.text}"
+            print(err_msg)
+            
+            # 만약 마지막 시도라면 텔레그램에러 메시지에 구체적인 사유를 담아 반환
+            if attempt == 2:
+                try:
+                    err_json = res.json()
+                    error_reason = err_json.get("error", {}).get("message", res.text[:100])
+                    return f"⚠️ Groq 에러 발생: {error_reason}"
+                except:
+                    return f"⚠️ Groq 에러 (Code {res.status_code})"
+            
             time.sleep(5)
             
         except requests.exceptions.Timeout:
@@ -104,7 +116,7 @@ def analyze_with_groq(summary_data):
             print(f"💥 Groq 통신 예외 발생 (시도 {attempt+1}/3): {e}")
             time.sleep(5)
             
-    return "⚠️ Groq AI 연결 지연 또는 모델 오류로 요약을 불러오지 못했습니다."
+    return "⚠️ Groq AI 연결 지연으로 요약을 불러오지 못했습니다."
 
 ### ---------------------------------------------------------------- 3. KRX API 데이터 수집 (방어 로직)
 def fetch_krx_market_data():
