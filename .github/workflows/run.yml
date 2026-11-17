@@ -1,0 +1,60 @@
+name: 예상 섹터 테마
+
+on:
+  schedule:
+    - cron: '0 2 * * 1-5'   # 월~금 점심 11:00 KST (UTC 02:00)
+    - cron: '0 3 * * 1-5'   # 월~금 점심 12:00 KST (UTC 03:00)
+    - cron: '0 8 * * 1-5'   # 월~금 저녁 17:00 KST (UTC 08:00)
+    - cron: '0 9 * * 1-5'   # 월~금 저녁 18:00 KST (UTC 09:00)
+
+  workflow_dispatch:
+    inputs:
+      market:
+        description: "KR / US / ALL"
+        default: "ALL"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sector-theme-signal
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          
+      - run: pip install -r requirements.txt
+      
+      - name: Pick market
+        id: m
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            M="${{ github.event.inputs.market }}"
+          else
+            M="KR US"
+          fi
+          [ "$M" = "ALL" ] && M="KR US"
+          echo "markets=$M" >> "$GITHUB_OUTPUT"
+          
+      - name: Run signals
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python bnf_signal.py ${{ steps.m.outputs.markets }}
+        
+      - name: Commit results
+        run: |
+          git config user.name "sector-bot"
+          git config user.email "sector-bot@users.noreply.github.com"
+          git add docs/data state
+          git diff --cached --quiet || git commit -m "sector theme update $(date -u +%F)"
+          git pull --rebase && git push
