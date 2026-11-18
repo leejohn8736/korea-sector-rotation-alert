@@ -1,5 +1,4 @@
-name: Korea Sector Rotation Alert
-
+name:  테마 순환
 on:
   workflow_dispatch:          # GitHub Actions 탭에서 수동 실행 버튼 허용[cite: 2]
   repository_dispatch:        # cron-job.org 외부 웹훅 신호를 수신하는 설정[cite: 2]
