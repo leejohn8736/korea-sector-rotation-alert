@@ -1,26 +1,26 @@
-name:  테마 순환
+name: 테마 섹터 예상
 on:
-  workflow_dispatch:          # GitHub Actions 탭에서 수동 실행 버튼 허용[cite: 2]
-  repository_dispatch:        # cron-job.org 외부 웹훅 신호를 수신하는 설정[cite: 2]
+  workflow_dispatch:
+  repository_dispatch:
     types: [wake_up]
 
 jobs:
   run:
     runs-on: ubuntu-latest
     permissions:
-      contents: write           # 결과 및 기록 파일 자동 저장을 위한 권한[cite: 2]
+      contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4[cite: 2]
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5[cite: 2]
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"[cite: 2]
+          python-version: "3.11"
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt[cite: 2]
+        run: pip install -r requirements.txt
 
       - name: Run sector rotation script
         env:
@@ -32,7 +32,7 @@ jobs:
 
       - name: Commit results
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}[cite: 2]
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "sector-bot"
           git config user.email "sector-bot@users.noreply.github.com"
