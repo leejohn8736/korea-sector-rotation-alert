@@ -1,16 +1,18 @@
 """
-예상 섹터 테마 & 수급 리포트 봇 (v4)
+예상 섹터 테마 & 수급 리포트 봇 (v5)
 - KRX Open API(유가증권/코스닥/ETF 일별매매정보) 기반 수급·테마 분석
-- 모든 순위 리스트 번호(상위→하위), 제목마다 아이콘
-- 오늘 vs 전일 테마 순위 변동 / 거래대금 유입·이탈(순환) 자동 계산, 최근 며칠 이력은 state/ 에 저장
-- Groq AI 2회 호출: (A) 총평·테마/섹터 정리  (B) 전일 리뷰·예상 테마·순환 섹터·정리 요약
+- 모든 순위 리스트 번호(상위→하위), 제목마다 아이콘, 문단 간격 정리
+- 오늘 vs 전일 테마 순위 변동 / 거래대금 유입·이탈(순환) 자동 계산, 이력은 state/ 에 저장
+- Groq AI 2회 호출: (A) 총평·테마/섹터 정리 (B) 전일 리뷰·예상 테마·순환 섹터·정리 요약
+- 텔레그램 3개 메시지로 글자 수 균형 분할 전송
 - AI가 실패해도 데이터 리포트는 전송
 """
-
 import os
+import re
 import sys
 import json
 import time
+import html
 import datetime as dt
 from pathlib import Path
 
@@ -25,7 +27,6 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_FILE = STATE_DIR / "theme_history.json"
 
 KST = dt.timezone(dt.timedelta(hours=9))
-
 KRX_BASE = "https://data-dbg.krx.co.kr/svc/apis"
 KRX_ENDPOINTS = {
     "유가증권": f"{KRX_BASE}/sto/stk_bydd_trd",
@@ -34,582 +35,380 @@ KRX_ENDPOINTS = {
 }
 ICONS = {"유가증권": "🏢", "코스닥": "🚀", "ETF": "📦"}
 
-# Groq production 텍스트 모델 (llama3-70b-8192, llama-3.3-70b-versatile 은 사용 불가 확인)
-# GROQ_MODEL 환경변수로 덮어쓸 수 있음
-GROQ_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+# Groq: llama3-70b-8192 는 종료된 모델이라 최신 모델로 교체
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-TOP_N = 10          # 시장별 상위 표시 개수
-AI_TOP_N = 20       # AI에게 넘기는 시장별 거래대금 상위 개수
-THEME_POOL = 200    # 테마 집계 대상: 거래대금 상위 N종목
-HISTORY_DAYS = 10   # 테마 이력 보관 일수
+# ───────────────────────── 아이콘 / 포맷 ─────────────────────────
+SECTION_ICONS = {
+    "총평": "📝", "테마": "🔥", "변동": "🔀", "유입": "📈", "이탈": "📉",
+    "상승": "⚡", "정리": "🧭", "리뷰": "🔍", "예상": "🎯", "순환": "🔄", "요약": "✅",
+}
+RANK_MARKS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+LINE = "━━━━━━━━━━━━━━"
+TG_LIMIT = 4000
 
-US_SECTOR_ETFS = {
-    "기술(XLK)": "XLK", "금융(XLF)": "XLF", "에너지(XLE)": "XLE",
-    "헬스케어(XLV)": "XLV", "산업재(XLI)": "XLI", "경기소비재(XLY)": "XLY",
-    "필수소비재(XLP)": "XLP", "유틸리티(XLU)": "XLU", "소재(XLB)": "XLB",
-    "부동산(XLRE)": "XLRE", "커뮤니케이션(XLC)": "XLC", "반도체(SOXX)": "SOXX",
+
+def rank_mark(i: int) -> str:
+    return RANK_MARKS[i] if i < len(RANK_MARKS) else f"{i + 1}."
+
+
+def make_section(icon: str, title: str, lines, numbered: bool = False) -> str:
+    """제목(아이콘) + 구분선 + 본문. 섹션 끝에 빈 줄."""
+    head = f"{icon} <b>{html.escape(title)}</b>\n{LINE}"
+    body = []
+    for i, ln in enumerate(lines):
+        ln = html.escape(str(ln).strip())
+        if not ln:
+            continue
+        body.append(f"{rank_mark(i)} {ln}" if numbered else f"▫️ {ln}")
+    if not body:
+        body = ["▫️ 데이터 없음"]
+    return head + "\n" + "\n".join(body) + "\n"
+
+
+# ───────────────────────── 테마 사전 (필요시 자유롭게 추가) ─────────────────────────
+THEME_MAP = {
+    "반도체": ["반도체", "하이닉스", "삼성전자", "한미반도체", "DB하이텍", "리노공업", "주성엔지니어링",
+              "원익IPS", "이오테크닉스", "테스", "HPSP", "피에스케이", "유진테크", "제주반도체", "에스티아이"],
+    "2차전지": ["에코프로", "엘앤에프", "포스코퓨처엠", "LG에너지솔루션", "삼성SDI", "SK이노베이션",
+              "천보", "솔브레인", "더블유씨피", "코스모신소재", "대주전자재료", "SKC"],
+    "바이오·제약": ["바이오", "제약", "셀트리온", "알테오젠", "삼성바이오", "유한양행", "한미약품",
+                 "HLB", "리가켐", "에이비엘", "펩트론", "보로노이", "파마", "헬스케어"],
+    "AI·로봇": ["로봇", "레인보우", "두산로보틱스", "에이아이", "AI", "솔트룩스", "마음AI", "클로봇", "뉴로메카"],
+    "방산·우주": ["한화에어로", "한국항공우주", "LIG넥스원", "현대로템", "풍산", "빛과전자",
+               "쎄트렉", "인텔리안", "한화시스템", "우주", "항공"],
+    "조선·해운": ["조선", "한화오션", "HD현대중공업", "삼성중공업", "HD현대미포", "HMM", "팬오션", "해운"],
+    "자동차·부품": ["현대차", "기아", "현대모비스", "현대위아", "한온시스템", "만도", "성우하이텍", "자동차"],
+    "전력·원전": ["두산에너빌리티", "한전", "LS ELECTRIC", "HD현대일렉트릭", "효성중공업",
+               "일진전기", "제룡전기", "원전", "전선", "LS전선", "대한전선", "가온전선"],
+    "금융·증권": ["금융", "KB금융", "신한지주", "하나금융", "우리금융", "증권", "미래에셋", "키움", "삼성생명", "보험"],
+    "엔터·게임": ["하이브", "JYP", "에스엠", "와이지", "엔터", "크래프톤", "엔씨소프트", "넷마블", "게임", "펄어비스"],
+    "화장품·소비": ["아모레", "LG생활건강", "코스메", "화장품", "코스맥스", "한국콜마", "실리콘투", "음식료", "CJ", "농심"],
+    "건설·인프라": ["건설", "현대건설", "GS건설", "대우건설", "DL이앤씨", "삼성물산", "시멘트"],
+    "철강·소재": ["POSCO홀딩스", "현대제철", "고려아연", "철강", "동국제강", "화학", "롯데케미칼", "금호석유"],
+    "플랫폼·SW": ["NAVER", "카카오", "더존", "소프트웨어", "클라우드", "플랫폼", "엔비디아"],
+    "신재생·에너지": ["태양광", "풍력", "수소", "OCI", "한화솔루션", "씨에스윈드", "두산퓨얼셀", "에너지"],
 }
 
-# 종목명 키워드 기반 테마 분류 (추정치. 자유롭게 추가/수정하세요)
-THEMES = {
-    "반도체": ["하이닉스", "삼성전자", "반도체", "DB하이텍", "한미반도체", "주성엔지니어링",
-              "리노공업", "이오테크닉스", "원익", "심텍", "삼성전기", "SK스퀘어", "테크윙",
-              "HPSP", "에스티아이", "피에스케이", "솔브레인", "동진쎄미켐", "ISC", "두산테스나",
-              "영광와이케이엠씨", "와이케이엠씨", "하나마이크론", "네패스", "티씨케이"],
-    "2차전지": ["에너지솔루션", "삼성SDI", "에코프로", "포스코퓨처엠", "엘앤에프", "배터리",
-              "SK이노베이션", "코스모신소재", "천보", "엔켐", "SKC", "이차전지"],
-    "바이오/제약": ["바이오", "제약", "셀트리온", "알테오젠", "유한양행", "한미약품", "HLB",
-                "리가켐", "에이비엘", "오스코텍", "메디", "헬스케어", "파마", "랩"],
-    "방산/조선": ["한화에어로", "LIG넥스원", "한국항공우주", "현대로템", "HD현대", "삼성중공업",
-              "한화오션", "조선", "풍산", "STX", "방산"],
-    "자동차": ["현대차", "현대모비스", "기아", "현대위아", "만도", "한온", "자동차"],
-    "금융/증권": ["금융", "증권", "은행", "보험", "KB금융", "신한지주", "하나금융", "우리금융",
-              "미래에셋", "키움", "메리츠", "손해보험", "화재", "벤처투자", "인베스트"],
-    "AI/소프트웨어": ["네이버", "NAVER", "카카오", "더존", "파수", "솔트룩스", "AI", "소프트", "클라우드"],
-    "엔터/미디어": ["하이브", "JYP", "에스엠", "와이지", "CJ ENM", "스튜디오드래곤", "엔터"],
-    "원전/전력기기": ["두산에너빌리티", "한전", "LS ELECTRIC", "효성중공업", "HD현대일렉트릭",
-                 "일진전기", "전선", "원자력", "LS"],
-    "음식료/소비": ["삼양식품", "농심", "오리온", "CJ제일제당", "백화점", "신세계", "롯데", "화장품"],
-}
+
+def classify_theme(name: str):
+    for theme, kws in THEME_MAP.items():
+        for kw in kws:
+            if kw.lower() in name.lower():
+                return theme
+    return None
 
 
-# ------------------------------------------------------------ 1. 텔레그램
-def split_message(text, limit=3800):
-    """줄 단위로 끊어서 텔레그램 길이 제한 내로 분할."""
-    parts, cur = [], ""
-    for line in text.split("\n"):
-        while len(line) > limit:
-            if cur:
-                parts.append(cur)
-                cur = ""
-            parts.append(line[:limit])
-            line = line[limit:]
-        if len(cur) + len(line) + 1 > limit:
-            parts.append(cur)
-            cur = line
-        else:
-            cur = f"{cur}\n{line}" if cur else line
-    if cur:
-        parts.append(cur)
-    return parts
-
-
-def send_telegram(text):
-    token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
-    chat = os.getenv("TELEGRAM_CHAT_ID")
-    if not token or not chat:
-        print("[텔레그램 경고] 토큰/챗ID 없음. 콘솔 출력으로 대체")
-        print(text)
-        return False
-
-    for part in split_message(text):
-        for attempt in range(3):
-            try:
-                r = requests.post(
-                    f"https://api.telegram.org/bot{token}/sendMessage",
-                    data={"chat_id": chat, "text": part,
-                          "disable_web_page_preview": "true"},
-                    timeout=20,
-                )
-                if r.ok:
-                    break
-                print(f"텔레그램 전송 {attempt + 1}회 실패:", r.status_code, r.text[:150])
-            except Exception as e:
-                print(f"텔레그램 통신 에러 ({attempt + 1}회):", e)
-            time.sleep(3)
-        else:
-            print("텔레그램 최종 전송 실패")
-            return False
-        time.sleep(0.5)
-    return True
-
-
-# ------------------------------------------------------------ 2. KRX 수집
-def to_num(s):
+# ───────────────────────── KRX 데이터 ─────────────────────────
+def to_num(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s.astype(str).str.replace(",", "", regex=False), errors="coerce")
 
 
-def krx_fetch(url, key, base_date):
-    """하루치 데이터. 휴장/미제공이면 빈 리스트, 인증 오류면 None."""
-    headers = {"AUTH_KEY": key}
-    for method in ("get", "post"):
-        try:
-            if method == "get":
-                r = requests.get(url, headers=headers, params={"basDd": base_date}, timeout=30)
-            else:
-                r = requests.post(url, headers=headers, json={"basDd": base_date}, timeout=30)
-        except Exception as e:
-            print(f"[KRX] {base_date} {method} 통신 예외: {e}")
-            continue
-
-        if r.status_code in (401, 403):
-            print(f"[KRX] 인증/권한 오류 {r.status_code}: {r.text[:200]}")
-            return None
-        if not r.ok:
-            print(f"[KRX] {base_date} {method} 실패 {r.status_code}: {r.text[:150]}")
-            continue
-        try:
-            return r.json().get("OutBlock_1", []) or []
-        except Exception as e:
-            print("[KRX] JSON 파싱 실패:", e, r.text[:150])
-    return []
-
-
-def krx_latest_two_days(url, key):
-    found = []
-    day = dt.datetime.now(KST).date()
-    for _ in range(12):
-        if day.weekday() < 5:
-            rows = krx_fetch(url, key, day.strftime("%Y%m%d"))
-            if rows is None:
-                return None, None
-            if rows:
-                found.append((day.strftime("%Y-%m-%d"), rows))
-                if len(found) == 2:
-                    break
-        day -= dt.timedelta(days=1)
-    if not found:
-        return None, None
-    return found[0], (found[1] if len(found) > 1 else None)
-
-
-def theme_of(name):
-    """종목명 → 테마 (없으면 '')."""
-    name = str(name)
-    for th, kws in THEMES.items():
-        if any(k in name for k in kws):
-            return th
-    return ""
-
-
-def make_frame(rows):
+def fetch_krx(market: str, ymd: str) -> pd.DataFrame:
+    key = os.environ.get("KRX_API_KEY", "")
+    try:
+        r = requests.get(KRX_ENDPOINTS[market], headers={"AUTH_KEY": key},
+                         params={"basDd": ymd}, timeout=30)
+        r.raise_for_status()
+        rows = r.json().get("OutBlock_1", [])
+    except Exception as e:
+        print(f"[KRX] {market} {ymd} 실패: {e}", file=sys.stderr)
+        return pd.DataFrame()
+    if not rows:
+        return pd.DataFrame()
     df = pd.DataFrame(rows)
-    for c in ("FLUC_RT", "ACC_TRDVAL"):
-        df[c] = to_num(df[c]) if c in df else float("nan")
-    if "ISU_NM" not in df:
-        df["ISU_NM"] = "?"
-    df = df.dropna(subset=["ACC_TRDVAL"]).copy()
-    df["theme"] = df["ISU_NM"].map(theme_of)
-    return df
+    out = pd.DataFrame({
+        "market": market,
+        "code": df.get("ISU_CD"),
+        "name": df.get("ISU_NM"),
+        "close": to_num(df.get("TDD_CLSPRC")),
+        "rate": to_num(df.get("FLUC_RT")),
+        "volume": to_num(df.get("ACC_TRDVOL")),
+        "value": to_num(df.get("ACC_TRDVAL")) / 1e8,   # 억원
+    })
+    return out.dropna(subset=["name", "value"])
 
 
-def eok(v):
-    return f"{v / 1e8:,.0f}억"
+def load_day(ymd: str) -> pd.DataFrame:
+    frames = [fetch_krx(m, ymd) for m in KRX_ENDPOINTS]
+    frames = [f for f in frames if not f.empty]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
-def fmt_rt(v):
-    return "N/A" if pd.isna(v) else f"{v:+.2f}%"
+def find_trading_days(n: int = 2):
+    """오늘부터 거슬러 올라가며 데이터가 있는 최근 n개 영업일(최신순) 반환."""
+    found, d = [], dt.datetime.now(KST).date()
+    for _ in range(20):
+        if d.weekday() < 5:
+            ymd = d.strftime("%Y%m%d")
+            df = fetch_krx("유가증권", ymd)
+            if not df.empty:
+                found.append(ymd)
+                if len(found) == n:
+                    break
+        d -= dt.timedelta(days=1)
+    return found
 
 
-# ------------------------------------------------------------ 3. 시장 블록
-def market_block(name, m):
-    """시장별 (표시 텍스트, AI 전달용 텍스트)."""
-    df = m["df"]
-    tv = df["ACC_TRDVAL"].sum()
-    w_rt = (df["FLUC_RT"].fillna(0) * df["ACC_TRDVAL"]).sum() / max(tv, 1)
-    up = int((df["FLUC_RT"] > 0).sum())
-    down = int((df["FLUC_RT"] < 0).sum())
-    flat = len(df) - up - down
-
-    head = f"총 거래대금 {eok(tv)}"
-    if m["prev"] is not None:
-        ptv = m["prev"]["ACC_TRDVAL"].sum()
-        if ptv:
-            head += f" (전일비 {(tv / ptv - 1) * 100:+.0f}%)"
-    head += f" / 거래대금가중 등락 {w_rt:+.2f}% / 상승 {up}·하락 {down}·보합 {flat}"
-
-    icon = ICONS.get(name, "▪️")
-    show_theme = name != "ETF"
-    lines = [f"{icon} {name} (데이터 기준일 {m['date']})", f"· {head}"]
-
-    if name == "ETF":
-        nm = df["ISU_NM"].astype(str)
-        inv = df[nm.str.contains("인버스")]["ACC_TRDVAL"].sum()
-        lev = df[nm.str.contains("레버리지")]["ACC_TRDVAL"].sum()
-        lines.append(f"· 🐻 인버스 {eok(inv)} ({inv / max(tv, 1) * 100:.0f}%) / "
-                     f"🐂 레버리지 {eok(lev)} ({lev / max(tv, 1) * 100:.0f}%)")
-
-    def tag(r):
-        return f" [{r['theme']}]" if show_theme and r["theme"] else ""
-
-    lines.append(f"💰 거래대금 상위 TOP {TOP_N}")
-    tv_top = df.sort_values("ACC_TRDVAL", ascending=False).head(TOP_N)
-    for i, (_, r) in enumerate(tv_top.iterrows(), 1):
-        lines.append(f"{i}. {r['ISU_NM']}{tag(r)} - {eok(r['ACC_TRDVAL'])} ({fmt_rt(r['FLUC_RT'])})")
-
-    lines.append(f"📈 상승률 상위 TOP {TOP_N} (거래대금 100억+)")
-    hot = df[df["ACC_TRDVAL"] >= 1e10].sort_values("FLUC_RT", ascending=False).head(TOP_N)
-    for i, (_, r) in enumerate(hot.iterrows(), 1):
-        lines.append(f"{i}. {r['ISU_NM']}{tag(r)} - {fmt_rt(r['FLUC_RT'])} / {eok(r['ACC_TRDVAL'])}")
-
-    ai = [f"## {name} (기준일 {m['date']})", head,
-          f"[거래대금 상위 {AI_TOP_N}] 순위|종목|거래대금|등락|키워드테마"]
-    for i, (_, r) in enumerate(df.sort_values("ACC_TRDVAL", ascending=False).head(AI_TOP_N).iterrows(), 1):
-        ai.append(f"{i}|{r['ISU_NM']}|{eok(r['ACC_TRDVAL'])}|{fmt_rt(r['FLUC_RT'])}|{r['theme'] or '-'}")
-    ai.append("[상승률 상위 5(거래대금 100억+)]")
-    for i, (_, r) in enumerate(hot.head(5).iterrows(), 1):
-        ai.append(f"{i}|{r['ISU_NM']}|{fmt_rt(r['FLUC_RT'])}|{eok(r['ACC_TRDVAL'])}")
-    return "\n".join(lines), "\n".join(ai)
+# ───────────────────────── 테마 계산 ─────────────────────────
+def build_theme_table(df: pd.DataFrame) -> pd.DataFrame:
+    stocks = df[df["market"].isin(["유가증권", "코스닥"])].copy()
+    stocks["theme"] = stocks["name"].map(classify_theme)
+    stocks = stocks.dropna(subset=["theme"])
+    if stocks.empty:
+        return pd.DataFrame(columns=["theme", "value", "rate", "count", "leaders", "rank"])
+    rows = []
+    for theme, g in stocks.groupby("theme"):
+        w = g["value"].clip(lower=0.01)
+        rate = float((g["rate"].fillna(0) * w).sum() / w.sum())
+        leaders = ", ".join(g.sort_values("value", ascending=False)["name"].head(3))
+        rows.append({"theme": theme, "value": float(g["value"].sum()), "rate": rate,
+                     "count": len(g), "leaders": leaders})
+    t = pd.DataFrame(rows).sort_values("value", ascending=False).reset_index(drop=True)
+    t["rank"] = t.index + 1
+    return t
 
 
-# ------------------------------------------------------------ 4. 테마 집계 / 이력 / 순환
-def theme_rows(frames):
-    """거래대금 상위 THEME_POOL 종목을 테마별 집계 → ({테마: 정보}, 풀 총거래대금)."""
-    if not frames:
-        return {}, 0
-    df = pd.concat(frames, ignore_index=True)
-    df = df.sort_values("ACC_TRDVAL", ascending=False).head(THEME_POOL)
-    pool_tv = df["ACC_TRDVAL"].sum()
-    rows = {}
-    for th, g in df[df["theme"] != ""].groupby("theme"):
-        tv = g["ACC_TRDVAL"].sum()
-        rows[th] = {
-            "tv": tv,
-            "rt": (g["FLUC_RT"].fillna(0) * g["ACC_TRDVAL"]).sum() / max(tv, 1),
-            "n": len(g),
-            "mem": g.sort_values("ACC_TRDVAL", ascending=False),
-        }
-    return rows, pool_tv
+def fmt_eok(v: float) -> str:
+    return f"{v / 10000:.1f}조" if abs(v) >= 10000 else f"{v:,.0f}억"
 
 
-def ranked(rows):
-    return sorted(rows.items(), key=lambda kv: -kv[1]["tv"])
+def arrow(x: float) -> str:
+    return "🔺" if x > 0 else ("🔻" if x < 0 else "➖")
 
 
-def load_history():
+# ───────────────────────── 이력 ─────────────────────────
+def load_history() -> dict:
     try:
         return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
 
-def save_history(hist, date_rows):
-    """date_rows: {날짜: {테마: [거래대금(억), 가중등락]}}. 최근 HISTORY_DAYS 일만 유지."""
-    try:
-        for d, themes in date_rows.items():
-            if themes:
-                hist[d] = themes
-        for d in sorted(hist)[:-HISTORY_DAYS]:
-            hist.pop(d, None)
-        HISTORY_FILE.write_text(json.dumps(hist, ensure_ascii=False, indent=1), encoding="utf-8")
-    except Exception as e:
-        print("[이력] 저장 실패:", repr(e))
+def save_history(h: dict):
+    keys = sorted(h.keys())[-10:]                       # 최근 10일만 유지
+    HISTORY_FILE.write_text(json.dumps({k: h[k] for k in keys}, ensure_ascii=False, indent=1),
+                            encoding="utf-8")
 
 
-def history_text(hist, exclude=()):
-    """최근 이력(최신순)을 날짜별 테마 TOP3로 요약."""
-    lines = []
-    for d in sorted(hist, reverse=True):
-        if d in exclude:
-            continue
-        top = sorted(hist[d].items(), key=lambda kv: -kv[1][0])[:3]
-        lines.append(f"{d}: " + ", ".join(f"{t}({v[0]:,.0f}억, {v[1]:+.1f}%)" for t, v in top))
-        if len(lines) >= 5:
-            break
-    return "\n".join(lines)
-
-
-def theme_block(today_frames, prev_frames, date, prev_date, hist):
-    """(표시 텍스트, AI 전달용 현재 테마, AI 전달용 순환/이력)"""
-    cur, pool_tv = theme_rows(today_frames)
-    prv, _ = theme_rows(prev_frames)
-    if not cur:
-        msg = "🔥 테마별 거래대금: 분류된 종목 없음"
-        return msg, "## 테마별 거래대금: 분류된 종목 없음", ""
-
-    cur_rank = ranked(cur)
-    prv_rank = ranked(prv)
-    prv_pos = {th: i for i, (th, _) in enumerate(prv_rank, 1)}
-    classified = sum(v["tv"] for v in cur.values())
-
-    lines = [f"🔥 테마별 거래대금 순위 ({date} 기준)",
-             f"· 유가증권+코스닥 거래대금 상위 {THEME_POOL}종목을 키워드로 분류한 추정치",
-             f"· 분류 {eok(classified)} / 미분류 {eok(pool_tv - classified)}"]
-    ai_cur = ["## 오늘 테마별 거래대금(키워드 분류 추정) 순위|테마|거래대금|전일비|순위변동|가중등락|종목수|대표종목(등락)"]
-
-    for i, (th, v) in enumerate(cur_rank, 1):
-        p = prv.get(th)
-        chg = f"{(v['tv'] / p['tv'] - 1) * 100:+.0f}%" if p and p["tv"] else "신규"
-        if th in prv_pos:
-            d = prv_pos[th] - i
-            mv = f"▲{d}" if d > 0 else (f"▼{-d}" if d < 0 else "–")
-        else:
-            mv = "NEW"
-        names = ", ".join(f"{r['ISU_NM']}({fmt_rt(r['FLUC_RT'])})" for _, r in v["mem"].head(5).iterrows())
-        lines.append(f"{i}. {th} - {eok(v['tv'])} (전일비 {chg}, 순위 {mv}) / 가중등락 {v['rt']:+.2f}% / {v['n']}종목")
-        lines.append(f"   └ {names}")
-        ai_cur.append(f"{i}|{th}|{eok(v['tv'])}|{chg}|{mv}|{v['rt']:+.2f}%|{v['n']}|{names}")
-
-    # 전일 테마
-    ai_rot = []
-    if prv_rank:
-        lines.append("")
-        lines.append(f"🕘 전일 테마 TOP 5 ({prev_date})")
-        ai_rot.append(f"## 전일({prev_date}) 테마 순위|테마|거래대금|가중등락")
-        for i, (th, v) in enumerate(prv_rank[:5], 1):
-            lines.append(f"{i}. {th} - {eok(v['tv'])} (가중등락 {v['rt']:+.2f}%)")
-        for i, (th, v) in enumerate(prv_rank[:8], 1):
-            ai_rot.append(f"{i}|{th}|{eok(v['tv'])}|{v['rt']:+.2f}%")
-
-        # 순환: 거래대금 증감
-        delta = {}
-        for th in set(cur) | set(prv):
-            delta[th] = cur.get(th, {}).get("tv", 0) - prv.get(th, {}).get("tv", 0)
-        inflow = [(t, x) for t, x in sorted(delta.items(), key=lambda kv: -kv[1]) if x > 0][:3]
-        outflow = [(t, x) for t, x in sorted(delta.items(), key=lambda kv: kv[1]) if x < 0][:3]
-        lines.append("")
-        lines.append("🔄 테마 순환 (전일 대비 거래대금 증감)")
-        lines.append("⬆️ 유입 " + (", ".join(f"{t} {x / 1e8:+,.0f}억" for t, x in inflow) or "없음"))
-        lines.append("⬇️ 이탈 " + (", ".join(f"{t} {x / 1e8:+,.0f}억" for t, x in outflow) or "없음"))
-        ai_rot.append("## 테마 순환(전일 대비 거래대금 증감)")
-        ai_rot.append("유입: " + (", ".join(f"{t} {x / 1e8:+,.0f}억" for t, x in inflow) or "없음"))
-        ai_rot.append("이탈: " + (", ".join(f"{t} {x / 1e8:+,.0f}억" for t, x in outflow) or "없음"))
-
-    ht = history_text(hist, exclude=(date, prev_date))
-    if ht:
-        ai_rot.append("## 그 이전 최근 테마 TOP3 이력(최신순)")
-        ai_rot.append(ht)
-
-    return "\n".join(lines), "\n".join(ai_cur), "\n".join(ai_rot)
-
-
-# ------------------------------------------------------------ 5. KR 수집
-def collect_kr():
-    """dict(show, ai_core, ai_rot, dates, ok)"""
-    key = (os.getenv("KRX_API_KEY") or "").strip()
+# ───────────────────────── Groq AI ─────────────────────────
+def call_groq(prompt: str, retries: int = 2) -> str:
+    key = os.environ.get("GROQ_API_KEY")
     if not key:
-        return {"show": "⚠️ KRX_API_KEY 미설정", "ai_core": "", "ai_rot": "", "dates": [], "ok": False}
-
-    shows, ais, dates, ok = [], [], [], False
-    stock_today, stock_prev, today_date, prev_date = [], [], None, None
-    for name, url in KRX_ENDPOINTS.items():
+        return ""
+    for attempt in range(retries + 1):
         try:
-            latest, prev = krx_latest_two_days(url, key)
-            if not latest:
-                shows.append(f"{ICONS.get(name, '▪️')} {name}: 데이터 수신 실패 (로그 확인)")
-                continue
-            m = {"date": latest[0], "df": make_frame(latest[1]),
-                 "prev": make_frame(prev[1]) if prev else None}
-            dates.append(latest[0])
-            if name in ("유가증권", "코스닥"):
-                stock_today.append(m["df"])
-                today_date = today_date or latest[0]
-                if prev:
-                    stock_prev.append(m["prev"])
-                    prev_date = prev_date or prev[0]
-            s, a = market_block(name, m)
-            shows.append(s)
-            ais.append(a)
-            ok = True
+            r = requests.post(
+                GROQ_URL,
+                headers={"Authorization": f"Bearer {key}"},
+                json={"model": GROQ_MODEL, "temperature": 0.4, "max_tokens": 1400,
+                      "messages": [
+                          {"role": "system", "content":
+                           "너는 한국 주식시장 수급 분석가다. 한국어로, 간결하고 단정적이지 않게 쓴다. "
+                           "마크다운(**, #)은 쓰지 말고 지정된 [태그] 형식을 정확히 지켜라."},
+                          {"role": "user", "content": prompt}]},
+                timeout=60,
+            )
+            if r.ok:
+                return r.json()["choices"][0]["message"]["content"].strip()
+            print(f"[Groq] {r.status_code} {r.text[:200]}", file=sys.stderr)
         except Exception as e:
-            print(f"[KRX] {name} 처리 예외:", repr(e))
-            shows.append(f"{ICONS.get(name, '▪️')} {name}: 처리 중 오류 ({type(e).__name__})")
-
-    ai_rot = ""
-    if stock_today:
-        hist = load_history()
-        ts, ta, ai_rot = theme_block(stock_today, stock_prev, today_date, prev_date, hist)
-        shows.insert(0, ts)
-        ais.insert(0, ta)
-
-        # 이력 저장 (오늘 + 전일)
-        def pack(frames):
-            rows, _ = theme_rows(frames)
-            return {t: [round(v["tv"] / 1e8), round(v["rt"], 2)] for t, v in rows.items()}
-        save_history(hist, {today_date: pack(stock_today),
-                            **({prev_date: pack(stock_prev)} if prev_date else {})})
-    return {"show": "\n\n".join(shows), "ai_core": "\n\n".join(ais), "ai_rot": ai_rot,
-            "dates": dates, "ok": ok}
+            print(f"[Groq] 예외: {e}", file=sys.stderr)
+        time.sleep(2 * (attempt + 1))
+    return ""
 
 
-# ------------------------------------------------------------ 6. 미국 섹터 (보조)
-def collect_us():
-    try:
-        import yfinance as yf
-        tickers = list(US_SECTOR_ETFS.values())
-        px = yf.download(tickers, period="7d", progress=False, auto_adjust=True)["Close"].dropna(how="all")
-        chg = (px.iloc[-1] / px.iloc[-2] - 1) * 100
-        rows = sorted(((n, chg[t]) for n, t in US_SECTOR_ETFS.items() if t in chg), key=lambda x: -x[1])
-        d = px.index[-1].strftime("%Y-%m-%d")
-        lines = [f"🇺🇸 미국 섹터 ETF 등락률 순위 (데이터 기준일 {d} 종가)"]
-        lines += [f"{i}. {n}: {v:+.2f}%" for i, (n, v) in enumerate(rows, 1)]
-        return "\n".join(lines), d
-    except Exception as e:
-        print("[US] 수집 실패:", repr(e))
-        return "🇺🇸 미국 섹터: 수집 실패", None
+def parse_blocks(text: str, keys) -> dict:
+    """[태그] 로 시작하는 블록을 {태그: [줄,...]} 로 파싱."""
+    out = {k: [] for k in keys}
+    cur = None
+    for ln in text.splitlines():
+        m = re.match(r"^\s*\[(.+?)\]\s*(.*)$", ln)
+        if m and m.group(1) in out:
+            cur = m.group(1)
+            if m.group(2).strip():
+                out[cur].append(m.group(2).strip())
+            continue
+        if cur and ln.strip():
+            out[cur].append(re.sub(r"^[\-\•\*\d\.\)\s]+", "", ln).strip())
+    return out
 
 
-# ------------------------------------------------------------ 7. Groq 요약
-COMMON_RULES = (
-    "당신은 국내 주식 시장 전문 애널리스트입니다. 친근하지만 간결한 존댓말로, 읽기 쉽게 쓰세요. "
-    "제공된 데이터에 있는 종목·수치만 근거로 하고, 없는 수치·뉴스는 지어내지 마세요. "
-    "'키워드테마'는 종목명 기반 추정이므로 틀리면 보정해도 됩니다. "
-    "'섹터'는 업종(반도체, 전기전자, 화학, 제약바이오, 금융, 운송, 건설, 음식료 등), "
-    "'테마'는 시장이 묶어 보는 이슈(AI반도체, 인버스, 방산, 2차전지 등)입니다. "
-    "업종 판단이 불확실하면 '(추정)'이라고 표시하세요. "
-    "섹션 제목은 아래 형식 그대로(아이콘 포함) 사용하고, 각 섹션은 짧은 번호 목록으로 쓰세요. 마크다운 기호(#, **)는 쓰지 마세요.\n\n"
-)
-
-PROMPT_A = COMMON_RULES + (
-    "🧭 [1] 총평 (2~3줄: 시장 분위기, 거래대금·등락·인버스 비중, 미국 연결)\n"
-    "🧩 [2] 테마별 거래대금 종목 정리 (거래대금 순으로 테마마다: 테마명 — 핵심 종목 — 섹터 — 한 줄 해석)\n"
-    "🏢 [3] 유가증권 테마·섹터 정리 (거래대금 상위 종목을 테마/섹터로 묶어 순위 순으로, 종목 포함)\n"
-    "🚀 [4] 코스닥 테마·섹터 정리 (같은 방식, 급등 종목의 테마 포함)"
-)
-
-PROMPT_B = COMMON_RULES + (
-    "아래는 오늘 데이터와, 앞서 작성한 요약 일부입니다. 이어서 작성하세요.\n"
-    "🕘 [5] 전일 테마 리뷰 (전일 상위 테마가 오늘 어떻게 달라졌는지 2~3줄)\n"
-    "🔮 [6] 예상 테마 (다음 거래일 관심 가질 만한 테마 2~3개: 테마명 — 근거 수치 — 예상 시나리오). "
-    "확정적 표현 대신 '~할 수 있습니다' 같은 시나리오 표현을 쓰세요.\n"
-    "🔄 [7] 순환 섹터 예상 (자금 유입→이탈 흐름 정리, 다음 순환 후보 섹터와 근거, 이력이 있으면 며칠 추세 반영)\n"
-    "📌 [8] 정리 요약 (정확히 아래 6줄)\n"
-    "1) 시장 총평(거래대금·가중등락·인버스 비중)\n"
-    "2) 자금이 몰린 테마\n"
-    "3) 약세 테마\n"
-    "4) 코스닥 급등 종목·테마\n"
-    "5) 미국 섹터와 국내 연결\n"
-    "6) 체크포인트 (1~2개)"
-)
+# ───────────────────────── 텔레그램 ─────────────────────────
+def split_balanced(sections, parts: int = 3):
+    n = len(sections)
+    if n <= parts:
+        return ["\n".join(sections[i:i + 1]) for i in range(n)]
+    lens = [len(s) for s in sections]
+    best, cuts = None, None
+    for a in range(1, n - 1):
+        for b in range(a + 1, n):
+            sizes = [sum(lens[:a]), sum(lens[a:b]), sum(lens[b:])]
+            score = max(sizes) - min(sizes)
+            if best is None or score < best:
+                best, cuts = score, (a, b)
+    a, b = cuts
+    return ["\n".join(c) for c in (sections[:a], sections[a:b], sections[b:])]
 
 
-def groq_call(system, user, max_tokens):
-    api_key = (os.getenv("GROQ_API_KEY") or "").strip()
-    if not api_key:
-        return None, "GROQ_API_KEY 미설정", None
-
-    models = list(dict.fromkeys(m for m in [os.getenv("GROQ_MODEL")] + GROQ_MODELS if m))
-    err_last = "알 수 없음"
-    for model in models:
-        payload = {
-            "model": model,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
-            "temperature": 0.3,
-            "max_completion_tokens": max_tokens,
-            "reasoning_effort": "low",
-        }
-        for attempt in range(3):
-            try:
-                print(f"🔄 Groq 호출 model={model} ({attempt + 1}/3)")
-                r = requests.post("https://api.groq.com/openai/v1/chat/completions",
-                                  json=payload,
-                                  headers={"Authorization": f"Bearer {api_key}",
-                                           "Content-Type": "application/json"},
-                                  timeout=90)
-                if r.ok:
-                    content = (r.json()["choices"][0]["message"].get("content") or "").strip()
-                    if content:
-                        return content, None, model
-                    err_last = f"{model}: 빈 응답"
-                    payload["max_completion_tokens"] = int(max_tokens * 1.8)
-                    continue
-
-                print(f"⚠️ Groq {r.status_code}: {r.text[:300]}")
-                try:
-                    err_last = r.json().get("error", {}).get("message", r.text[:120])
-                except Exception:
-                    err_last = f"HTTP {r.status_code}"
-
-                if r.status_code == 400 and "reasoning" in r.text.lower() and "reasoning_effort" in payload:
-                    payload.pop("reasoning_effort")
-                    continue
-                if r.status_code == 413 or (r.status_code == 400 and "too large" in r.text.lower()):
-                    payload["messages"][1]["content"] = user[:3500]
-                    continue
-                if r.status_code == 429:
-                    wait = 15
-                    try:
-                        wait = min(60, int(float(r.headers.get("retry-after", wait))) + 2)
-                    except Exception:
-                        pass
-                    time.sleep(wait)
-                    continue
-                if r.status_code in (400, 401, 403, 404):
-                    break
-            except Exception as e:
-                err_last = f"{type(e).__name__}: {e}"
-                print("💥 Groq 예외:", err_last)
-            time.sleep(4)
-    return None, err_last[:200], None
+def hard_split(text: str, limit: int = TG_LIMIT):
+    if len(text) <= limit:
+        return [text]
+    out, cur = [], ""
+    for ln in text.split("\n"):
+        if len(cur) + len(ln) + 1 > limit:
+            out.append(cur)
+            cur = ""
+        cur += ln + "\n"
+    if cur:
+        out.append(cur)
+    return out
 
 
-def analyze(kr, us_text, asof_line):
-    """(요약 본문, 사용 모델 리스트). 부분 실패 시 해당 부분에 사유 표기."""
-    core = "\n\n".join(t for t in (kr["ai_core"], us_text) if t)
-    if not core:
-        return "⚠️ 요약 실패: 분석할 데이터 없음", []
+def send_telegram(sections, header: str):
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        print("텔레그램 시크릿 없음 → 콘솔 출력", file=sys.stderr)
+        print(header, *sections, sep="\n")
+        return
+    msgs = split_balanced(sections, 3)
+    total = len(msgs)
+    for idx, m in enumerate(msgs, 1):
+        top = f"{header}\n\n" if idx == 1 else ""
+        text = f"📨 <b>({idx}/{total})</b>\n\n{top}{m}"
+        for piece in hard_split(text):
+            r = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": piece, "parse_mode": "HTML",
+                      "disable_web_page_preview": True}, timeout=20)
+            if not r.ok:
+                print("텔레그램 실패:", r.text, file=sys.stderr)
+            time.sleep(0.8)
 
-    used, out = [], []
-    a, err_a, ma = groq_call(PROMPT_A, f"{asof_line}\n\n{core[:7000]}", 3000)
-    if a:
-        out.append(a)
-        used.append(ma)
+
+# ───────────────────────── 메인 ─────────────────────────
+def main():
+    days = find_trading_days(2)
+    if not days:
+        send_telegram([make_section("⚠️", "데이터 오류", ["KRX 데이터를 불러오지 못했습니다. KRX_API_KEY와 서비스 승인 여부를 확인하세요."])],
+                      "📊 <b>예상 섹터 테마 리포트</b>")
+        return
+    today_ymd = days[0]
+    prev_ymd = days[1] if len(days) > 1 else None
+    nice = f"{today_ymd[:4]}-{today_ymd[4:6]}-{today_ymd[6:]}"
+
+    df = load_day(today_ymd)
+    themes = build_theme_table(df)
+
+    # 전일 테마 (이력 우선, 없으면 재조회)
+    hist = load_history()
+    prev_themes = None
+    if prev_ymd:
+        if prev_ymd in hist and hist[prev_ymd].get("themes"):
+            prev_themes = pd.DataFrame(hist[prev_ymd]["themes"])
+        else:
+            prev_themes = build_theme_table(load_day(prev_ymd))
+
+    # ── 데이터 섹션 ──
+    sections = []
+
+    top_lines = [f"{r.theme}  {fmt_eok(r.value)} · {r.rate:+.2f}%  ({r.leaders})"
+                 for r in themes.head(8).itertuples()]
+    sec_top = make_section(SECTION_ICONS["테마"], "오늘의 TOP 테마 (거래대금순)", top_lines, numbered=True)
+
+    change_lines, inflow, outflow = [], [], []
+    if prev_themes is not None and not prev_themes.empty and not themes.empty:
+        m = themes.merge(prev_themes[["theme", "rank", "value"]], on="theme",
+                         how="left", suffixes=("", "_prev"))
+        for r in m.head(8).itertuples():
+            if pd.isna(r.rank_prev):
+                change_lines.append(f"{r.theme}  🆕 신규 진입 ({r.rank}위)")
+            else:
+                diff = int(r.rank_prev - r.rank)
+                tag = f"🔺{diff}" if diff > 0 else (f"🔻{-diff}" if diff < 0 else "➖")
+                change_lines.append(f"{r.theme}  {int(r.rank_prev)}위 → {r.rank}위 ({tag})")
+        m["diff"] = m["value"] - m["value_prev"].fillna(0)
+        inflow = [f"{r.theme}  +{fmt_eok(r.diff)} (전일 {fmt_eok(0 if pd.isna(r.value_prev) else r.value_prev)})"
+                  for r in m.sort_values("diff", ascending=False).head(5).itertuples() if r.diff > 0]
+        outflow = [f"{r.theme}  -{fmt_eok(abs(r.diff))} (전일 {fmt_eok(r.value_prev)})"
+                   for r in m.sort_values("diff").head(5).itertuples()
+                   if r.diff < 0 and not pd.isna(r.value_prev)]
     else:
-        out.append(f"⚠️ [1]~[4] 요약 실패: {err_a}")
+        change_lines = ["전일 비교 데이터가 아직 없습니다 (내일부터 표시)"]
 
-    time.sleep(3)  # 분당 토큰 한도 완화
-    rot = kr["ai_rot"] or "(전일 비교 데이터 없음)"
-    head_core = core[:2500]
-    prior = f"\n\n[앞서 작성한 요약(일부)]\n{a[:1800]}" if a else ""
-    user_b = f"{asof_line}\n\n{rot}\n\n[오늘 데이터 요약]\n{head_core}{prior}"
-    b, err_b, mb = groq_call(PROMPT_B, user_b[:7000], 3000)
-    if b:
-        out.append(b)
-        if mb not in used:
-            used.append(mb)
+    sec_change = make_section(SECTION_ICONS["변동"], "테마 순위 변동 (전일 대비)", change_lines, numbered=True)
+    sec_in = make_section(SECTION_ICONS["유입"], "거래대금 유입 (순환 ↑)", inflow, numbered=True)
+    sec_out = make_section(SECTION_ICONS["이탈"], "거래대금 이탈 (순환 ↓)", outflow, numbered=True)
+
+    market_secs = []
+    for mk in ["유가증권", "코스닥", "ETF"]:
+        sub = df[df["market"] == mk].sort_values("value", ascending=False).head(7)
+        lines = [f"{r.name}  {fmt_eok(r.value)} · {r.rate:+.2f}%" for r in sub.itertuples()]
+        market_secs.append(make_section(ICONS[mk], f"{mk} 거래대금 TOP", lines, numbered=True))
+
+    liquid = df[(df["market"] != "ETF") & (df["value"] >= 100)].sort_values("rate", ascending=False).head(7)
+    sec_up = make_section(SECTION_ICONS["상승"], "상승률 TOP (거래대금 100억↑)",
+                          [f"{r.name}  {r.rate:+.2f}% · {fmt_eok(r.value)}" for r in liquid.itertuples()],
+                          numbered=True)
+
+    # ── AI A: 총평 + 테마/섹터 정리 ──
+    data_brief = (
+        f"기준일 {nice}\n[TOP 테마]\n" + "\n".join(top_lines) +
+        "\n[순위변동]\n" + "\n".join(change_lines) +
+        "\n[유입]\n" + "\n".join(inflow) + "\n[이탈]\n" + "\n".join(outflow) +
+        "\n[상승률 TOP]\n" + "\n".join(f"{r.name} {r.rate:+.1f}%" for r in liquid.itertuples())
+    )
+    ai_a = call_groq(
+        data_brief + "\n\n위 수급 데이터를 바탕으로 아래 태그 형식으로만 답하라. "
+        "각 태그 아래 줄마다 '- '로 시작하는 짧은 문장 2~4개.\n[총평]\n[테마정리]\n[섹터정리]")
+    blocks_a = parse_blocks(ai_a, ["총평", "테마정리", "섹터정리"]) if ai_a else {}
+    if blocks_a and any(blocks_a.values()):
+        sec_summary = make_section(SECTION_ICONS["총평"], "시장 총평", blocks_a["총평"])
+        sec_theme_sum = make_section(SECTION_ICONS["정리"], "테마·섹터 정리",
+                                     blocks_a["테마정리"] + blocks_a["섹터정리"])
     else:
-        out.append(f"⚠️ [5]~[8] 요약 실패: {err_b}")
+        sec_summary = make_section("⏳", "시장 총평", ["AI 요약 연결 지연 또는 모델 오류 (데이터 리포트만 전송)"])
+        sec_theme_sum = None
 
-    return "\n\n".join(out), used
+    # ── AI B: 전일 리뷰 / 예상 테마 / 순환 / 요약 ──
+    prev_expect = ""
+    if prev_ymd and prev_ymd in hist:
+        prev_expect = hist[prev_ymd].get("expect", "")
+    ai_b = call_groq(
+        data_brief + f"\n\n[전일 예상 테마]\n{prev_expect or '기록 없음'}\n\n"
+        "전일 예상과 오늘 결과를 비교해 아래 태그 형식으로만 답하라. 줄마다 '- '로 시작하는 짧은 문장 2~4개. "
+        "예상 테마는 테마명만 쉼표로 3개 이내 먼저 쓰고 근거를 덧붙여라.\n[전일리뷰]\n[예상테마]\n[순환섹터]\n[정리요약]")
+    blocks_b = parse_blocks(ai_b, ["전일리뷰", "예상테마", "순환섹터", "정리요약"]) if ai_b else {}
+    ai_secs = []
+    if blocks_b and any(blocks_b.values()):
+        ai_secs = [
+            make_section(SECTION_ICONS["리뷰"], "전일 예상 리뷰", blocks_b["전일리뷰"]),
+            make_section(SECTION_ICONS["예상"], "다음 거래일 예상 테마", blocks_b["예상테마"]),
+            make_section(SECTION_ICONS["순환"], "순환 예상 섹터", blocks_b["순환섹터"]),
+            make_section(SECTION_ICONS["요약"], "한 줄 정리", blocks_b["정리요약"]),
+        ]
 
+    # 섹션 조립 (분량 균형은 split_balanced 가 처리)
+    sections = [sec_summary, sec_top, sec_change, sec_in, sec_out] + market_secs + [sec_up]
+    if sec_theme_sum:
+        sections.append(sec_theme_sum)
+    sections += ai_secs
 
-# ------------------------------------------------------------ 8. 메인
-def run():
-    markets = [m.upper() for m in sys.argv[1:]] or ["KR", "US"]
-    now = dt.datetime.now(KST)
-    now_s = now.strftime("%Y-%m-%d %H:%M KST")
-    print(f"🎯 타겟 마켓: {markets} / {now_s}")
+    header = f"📊 <b>예상 섹터 테마 리포트</b>\n🗓 기준일 {nice} · ⏰ {dt.datetime.now(KST):%H:%M} 발송"
+    send_telegram(sections, header)
 
-    kr = {"show": "", "ai_core": "", "ai_rot": "", "dates": [], "ok": False}
-    us_text, us_date = "", None
-    if "KR" in markets:
-        kr = collect_kr()
-    if "US" in markets:
-        us_text, us_date = collect_us()
-
-    kr_date = max(kr["dates"]) if kr["dates"] else "없음"
-    asof_line = (f"[기준] 리포트 생성 {now_s} / 국내 데이터 기준일 {kr_date} (최근 영업일 종가) / "
-                 f"미국 데이터 기준일 {us_date or '없음'} 종가")
-
-    facts_show = "\n\n".join(t for t in (kr["show"], us_text) if t)
-    summary, used = analyze(kr, us_text, asof_line)
-
-    msg = "📊 [예상 섹터 테마 & 수급 리포트]\n"
-    msg += f"⏰ 리포트 생성: {now_s}\n"
-    msg += f"📅 국내 데이터 기준일: {kr_date} (최근 영업일 종가) / 미국: {us_date or '없음'} 종가\n\n"
-    msg += facts_show + "\n\n"
-    msg += f"🤖 AI 섹터·테마 요약 ({now:%H:%M} 생성, 데이터 {kr_date} 기준"
-    msg += f", {'/'.join(used)})\n" if used else ")\n"
-    msg += summary + "\n\n"
-    msg += "※ 예상·순환 전망은 거래대금·등락 데이터 기반 시나리오이며 투자 권유가 아닙니다."
-
-    print("전송 메시지:\n", msg)
-
+    # ── 이력/데이터 저장 ──
+    hist[today_ymd] = {
+        "themes": themes.to_dict("records"),
+        "expect": " / ".join(blocks_b.get("예상테마", [])) if blocks_b else "",
+    }
+    save_history(hist)
     (DATA_DIR / "latest.json").write_text(
-        json.dumps({"generated": now.isoformat(), "kr_date": kr_date, "us_date": us_date,
-                    "report": facts_show, "summary": summary, "models": used},
-                   ensure_ascii=False, indent=2), encoding="utf-8")
-
-    sent = send_telegram(msg)
-    print("✅ 텔레그램 전송 성공" if sent else "❌ 텔레그램 전송 실패")
-    if "KR" in markets and not kr["ok"]:
-        sys.exit(1)
+        json.dumps({"date": nice, "themes": themes.to_dict("records")}, ensure_ascii=False, indent=1),
+        encoding="utf-8")
 
 
 if __name__ == "__main__":
-    try:
-        run()
-    except Exception as e:
-        print("💥 치명적 에러:", repr(e))
-        sys.exit(1)
+    main()
